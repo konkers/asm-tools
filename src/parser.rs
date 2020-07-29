@@ -1,8 +1,8 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::space0,
-    combinator::map_res,
+    bytes::complete::{tag, tag_no_case, take_while, take_while_m_n},
+    character::complete::{space0, space1},
+    combinator::{map_res, opt},
     error::ParseError,
     multi::many_m_n,
     number::complete::le_u8,
@@ -12,8 +12,10 @@ use num_traits::Num;
 use strum::IntoStaticStr;
 
 mod huc6280;
+mod inst_table;
 
 use huc6280::get_huc6280_instruction_table;
+use inst_table::InstructionTable;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Error<I> {
@@ -25,14 +27,22 @@ struct Error<I> {
 enum ErrorKind<I> {
     Nom(I, nom::error::ErrorKind),
     UnknownMnemonic(I, String),
+    UnsupportedAddressMode(I, Mnemonic, AddressMode),
 }
 
 impl<I> Error<I> {
-    fn from_custom(input: I, kind: ErrorKind<I>) -> Self {
-        Self {
-            kind,
+    fn unknown_mnemonic(i: I, mnemonic: String) -> nom::Err<Error<I>> {
+        nom::Err::Error(Self {
+            kind: ErrorKind::UnknownMnemonic(i, mnemonic),
             errors: Vec::new(),
-        }
+        })
+    }
+
+    fn unsupported_address_mode(i: I, mnemonic: Mnemonic, mode: AddressMode) -> nom::Err<Error<I>> {
+        nom::Err::Error(Self {
+            kind: ErrorKind::UnsupportedAddressMode(i, mnemonic, mode),
+            errors: Vec::new(),
+        })
     }
 }
 
@@ -50,8 +60,16 @@ impl<I> nom::error::ParseError<I> for Error<I> {
     }
 }
 
-#[derive(Clone, Debug, IntoStaticStr, PartialEq)]
-enum Mnemonic {
+impl<I> From<(I, nom::error::ErrorKind)> for Error<I> {
+    fn from(e: (I, nom::error::ErrorKind)) -> Error<I> {
+        Error::from_error_kind(e.0, e.1)
+    }
+}
+
+type ParserResult<'a, T> = IResult<&'a str, T, Error<&'a str>>;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, IntoStaticStr, PartialEq)]
+pub(crate) enum Mnemonic {
     Adc,
     And,
     Asl,
@@ -141,7 +159,50 @@ enum Mnemonic {
     Tya,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl From<Mnemonic> for String {
+    fn from(m: Mnemonic) -> String {
+        match m {
+            Mnemonic::Bbr(num)
+            | Mnemonic::Bbs(num)
+            | Mnemonic::Rmb(num)
+            | Mnemonic::Smb(num)
+            | Mnemonic::St(num) => {
+                let s: &'static str = (&m).into();
+                format!("{}{}", s, num)
+            }
+            _ => {
+                let s: &'static str = (&m).into();
+                s.into()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AddressMode {
+    Implied,
+    Accumulator,
+    Relative,
+    Immediate,
+    ImmediateZeroPage,
+    ImmediateZeroPageX,
+    ImmediateAbsolute,
+    ImmediateAbsoluteX,
+    ZeroPage,
+    ZeroPageX,
+    ZeroPageY,
+    ZeroPageRelative,
+    Absolute,
+    AbsoluteX,
+    AbsoluteY,
+    Indirect,
+    IndexedIndirect,
+    IndexedIndirect16,
+    IndirectIndexed,
+    BlockTransfer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Address {
     Implied,
     Accumulator,
@@ -165,6 +226,33 @@ enum Address {
     BlockTransfer(u16, u16, u16),
 }
 
+impl Address {
+    fn mode(&self) -> AddressMode {
+        match self {
+            Self::Implied => AddressMode::Implied,
+            Self::Accumulator => AddressMode::Accumulator,
+            Self::Relative(_) => AddressMode::Relative,
+            Self::Immediate(_) => AddressMode::Immediate,
+            Self::ImmediateZeroPage(_, _) => AddressMode::ImmediateZeroPage,
+            Self::ImmediateZeroPageX(_, _) => AddressMode::ImmediateZeroPageX,
+            Self::ImmediateAbsolute(_, _) => AddressMode::ImmediateAbsolute,
+            Self::ImmediateAbsoluteX(_, _) => AddressMode::ImmediateAbsoluteX,
+            Self::ZeroPage(_) => AddressMode::ZeroPage,
+            Self::ZeroPageX(_) => AddressMode::ZeroPageX,
+            Self::ZeroPageY(_) => AddressMode::ZeroPageY,
+            Self::ZeroPageRelative(_, _) => AddressMode::ZeroPageRelative,
+            Self::Absolute(_) => AddressMode::Absolute,
+            Self::AbsoluteX(_) => AddressMode::AbsoluteX,
+            Self::AbsoluteY(_) => AddressMode::AbsoluteY,
+            Self::Indirect(_) => AddressMode::Indirect,
+            Self::IndexedIndirect(_) => AddressMode::IndexedIndirect,
+            Self::IndexedIndirect16(_) => AddressMode::IndexedIndirect16,
+            Self::IndirectIndexed(_) => AddressMode::IndirectIndexed,
+            Self::BlockTransfer(_, _, _) => AddressMode::BlockTransfer,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Instruction {
     mnemonic: Mnemonic,
@@ -185,17 +273,17 @@ fn is_hex_digit(c: char) -> bool {
     c.is_digit(16)
 }
 
-fn hex_u8(i: &str) -> IResult<&str, u8> {
+fn hex_u8(i: &str) -> ParserResult<u8> {
     map_res(take_while_m_n(2, 2, is_hex_digit), from_hex)(i)
 }
 
-fn hex_u16(i: &str) -> IResult<&str, u16> {
+fn hex_u16(i: &str) -> ParserResult<u16> {
     map_res(take_while_m_n(4, 4, is_hex_digit), from_hex)(i)
 }
 
-fn parens<T, F>(f: F) -> impl Fn(&str) -> IResult<&str, T>
+fn parens<T, F>(f: F) -> impl Fn(&str) -> ParserResult<T>
 where
-    F: Fn(&str) -> IResult<&str, T>,
+    F: Fn(&str) -> ParserResult<T>,
 {
     move |i: &str| {
         let (i, _) = tag("(")(i)?;
@@ -208,47 +296,47 @@ where
     }
 }
 
-fn comma(i: &str) -> IResult<&str, ()> {
+fn comma(i: &str) -> ParserResult<()> {
     let (i, _) = space0(i)?;
     let (i, _) = tag(",")(i)?;
     let (i, _) = space0(i)?;
     Ok((i, ()))
 }
 
-fn addr_mode_implied(i: &str) -> IResult<&str, Address> {
+fn addr_mode_implied(i: &str) -> ParserResult<Address> {
     Ok((i, Address::Implied))
 }
 
-fn addr_mode_accumulator(i: &str) -> IResult<&str, Address> {
+fn addr_mode_accumulator(i: &str) -> ParserResult<Address> {
     let (i, _) = alt((tag("a"), tag("A")))(i)?;
     Ok((i, Address::Accumulator))
 }
 
-fn addr_mode_relative(i: &str) -> IResult<&str, Address> {
+fn addr_mode_relative(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::Relative(addr)))
 }
 
-fn indexed_x(i: &str) -> IResult<&str, &str> {
+fn indexed_x(i: &str) -> ParserResult<&str> {
     let (i, _) = comma(i)?;
     alt((tag("x"), tag("X")))(i)
 }
 
-fn indexed_y(i: &str) -> IResult<&str, &str> {
+fn indexed_y(i: &str) -> ParserResult<&str> {
     let (i, _) = comma(i)?;
     alt((tag("y"), tag("Y")))(i)
 }
 
-fn addr_mode_immediate(i: &str) -> IResult<&str, Address> {
+fn addr_mode_immediate(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::Immediate(addr)))
 }
 
-fn addr_mode_immediate_zero_page(i: &str) -> IResult<&str, Address> {
+fn addr_mode_immediate_zero_page(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -258,7 +346,7 @@ fn addr_mode_immediate_zero_page(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ImmediateZeroPage(val, addr)))
 }
 
-fn addr_mode_immediate_zero_page_x(i: &str) -> IResult<&str, Address> {
+fn addr_mode_immediate_zero_page_x(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -269,7 +357,7 @@ fn addr_mode_immediate_zero_page_x(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ImmediateZeroPageX(val, addr)))
 }
 
-fn addr_mode_immediate_absolute(i: &str) -> IResult<&str, Address> {
+fn addr_mode_immediate_absolute(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -279,7 +367,7 @@ fn addr_mode_immediate_absolute(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ImmediateAbsolute(val, addr)))
 }
 
-fn addr_mode_immediate_absolute_x(i: &str) -> IResult<&str, Address> {
+fn addr_mode_immediate_absolute_x(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -290,14 +378,14 @@ fn addr_mode_immediate_absolute_x(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ImmediateAbsoluteX(val, addr)))
 }
 
-fn addr_mode_zero_page(i: &str) -> IResult<&str, Address> {
+fn addr_mode_zero_page(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::ZeroPage(addr)))
 }
 
-fn addr_mode_zero_page_x(i: &str) -> IResult<&str, Address> {
+fn addr_mode_zero_page_x(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
     let (i, _) = indexed_x(i)?;
@@ -305,7 +393,7 @@ fn addr_mode_zero_page_x(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ZeroPageX(addr)))
 }
 
-fn addr_mode_zero_page_y(i: &str) -> IResult<&str, Address> {
+fn addr_mode_zero_page_y(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
     let (i, _) = indexed_y(i)?;
@@ -313,7 +401,7 @@ fn addr_mode_zero_page_y(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ZeroPageY(addr)))
 }
 
-fn addr_mode_zero_page_relative(i: &str) -> IResult<&str, Address> {
+fn addr_mode_zero_page_relative(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
@@ -325,14 +413,14 @@ fn addr_mode_zero_page_relative(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::ZeroPageRelative(addr, offset)))
 }
 
-fn addr_mode_absolute(i: &str) -> IResult<&str, Address> {
+fn addr_mode_absolute(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
 
     Ok((i, Address::Absolute(addr)))
 }
 
-fn addr_mode_absolute_x(i: &str) -> IResult<&str, Address> {
+fn addr_mode_absolute_x(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
     let (i, _) = indexed_x(i)?;
@@ -340,7 +428,7 @@ fn addr_mode_absolute_x(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::AbsoluteX(addr)))
 }
 
-fn addr_mode_absolute_y(i: &str) -> IResult<&str, Address> {
+fn addr_mode_absolute_y(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
     let (i, _) = indexed_y(i)?;
@@ -348,7 +436,7 @@ fn addr_mode_absolute_y(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::AbsoluteY(addr)))
 }
 
-fn addr_mode_indirect(i: &str) -> IResult<&str, Address> {
+fn addr_mode_indirect(i: &str) -> ParserResult<Address> {
     parens(|i: &str| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u16(i)?;
@@ -357,7 +445,7 @@ fn addr_mode_indirect(i: &str) -> IResult<&str, Address> {
     })(i)
 }
 
-fn addr_mode_indexed_indirect(i: &str) -> IResult<&str, Address> {
+fn addr_mode_indexed_indirect(i: &str) -> ParserResult<Address> {
     parens(|i: &str| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u8(i)?;
@@ -367,7 +455,7 @@ fn addr_mode_indexed_indirect(i: &str) -> IResult<&str, Address> {
     })(i)
 }
 
-fn addr_mode_indexed_indirect16(i: &str) -> IResult<&str, Address> {
+fn addr_mode_indexed_indirect16(i: &str) -> ParserResult<Address> {
     parens(|i: &str| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u16(i)?;
@@ -377,7 +465,7 @@ fn addr_mode_indexed_indirect16(i: &str) -> IResult<&str, Address> {
     })(i)
 }
 
-fn addr_mode_indirect_indexed(i: &str) -> IResult<&str, Address> {
+fn addr_mode_indirect_indexed(i: &str) -> ParserResult<Address> {
     let (i, addr) = parens(|i: &str| {
         let (i, _) = tag("$")(i)?;
         hex_u8(i)
@@ -386,7 +474,7 @@ fn addr_mode_indirect_indexed(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::IndirectIndexed(addr)))
 }
 
-fn addr_mode_block_transfer(i: &str) -> IResult<&str, Address> {
+fn addr_mode_block_transfer(i: &str) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, src_addr) = hex_u16(i)?;
     let (i, _) = comma(i)?;
@@ -399,49 +487,94 @@ fn addr_mode_block_transfer(i: &str) -> IResult<&str, Address> {
     Ok((i, Address::BlockTransfer(src_addr, dst_addr, len)))
 }
 
-fn mnemonic<'a>(n: Mnemonic) -> impl Fn(&str) -> IResult<&str, ()> {
-    let s = match n {
-        Mnemonic::Bbr(num)
-        | Mnemonic::Bbs(num)
-        | Mnemonic::Rmb(num)
-        | Mnemonic::Smb(num)
-        | Mnemonic::St(num) => {
-            let s: &'static str = (&n).into();
-            format!("{}{}", s, num)
-        }
-        _ => {
-            let s: &'static str = (&n).into();
-            s.into()
-        }
-    };
+fn address(i: &str) -> IResult<&str, Address, Error<&str>> {
+    alt((
+        addr_mode_block_transfer,
+        addr_mode_indirect_indexed,
+        addr_mode_indexed_indirect,
+        addr_mode_indexed_indirect16,
+        addr_mode_indirect,
+        addr_mode_absolute_y,
+        addr_mode_absolute_x,
+        addr_mode_absolute,
+        addr_mode_zero_page_relative,
+        addr_mode_zero_page_y,
+        addr_mode_zero_page_x,
+        addr_mode_zero_page,
+        addr_mode_immediate_absolute_x,
+        addr_mode_immediate_absolute,
+        addr_mode_immediate_zero_page_x,
+        addr_mode_immediate_zero_page,
+        addr_mode_immediate,
+        addr_mode_relative,
+        addr_mode_accumulator,
+        addr_mode_implied,
+    ))(i)
+}
 
-    move |i: &str| {
-        let (i, _) = tag_no_case(&*s)(i)?;
-        Ok((i, ()))
+fn is_mnemonic_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+}
+
+fn mnemonic<'a>(
+    inst_table: &InstructionTable,
+    i: &'a str,
+) -> IResult<&'a str, Mnemonic, Error<&'a str>> {
+    let (i, mnemonic_str) = take_while(is_mnemonic_char)(i)?;
+    let mnemonic_str = mnemonic_str.to_lowercase();
+
+    match inst_table.mnemonic_map.get(&mnemonic_str) {
+        Some(mnemonic) => Ok((i, *mnemonic)),
+        None => Err(Error::unknown_mnemonic(i, mnemonic_str)),
     }
 }
 
-fn line<'a>(
-    inst_table: &Vec<Box<dyn Fn(&str) -> IResult<&str, Instruction>>>,
-    i: &'a str,
-) -> IResult<&'a str, Line, Error<&'a str>> {
-    for matcher in inst_table {
-        if let Ok((i, inst)) = matcher(i) {
-            return Ok((i, Line { inst }));
+fn line<'a>(inst_table: &InstructionTable, i: &'a str) -> IResult<&'a str, Line, Error<&'a str>> {
+    let (i, mnemonic) = mnemonic(inst_table, i)?;
+
+    let (i, addr) = opt(|i: &str| -> ParserResult<Address> {
+        let (i, _) = space1(i)?;
+        address(i)
+    })(i)?;
+
+    let mut addr = addr.unwrap_or(Address::Implied);
+    let mut mode = addr.mode();
+
+    // ZeroPage and Relative have the same text representation.  ZeroPage
+    // takes precedence in the parsing so we need to fix it up here
+    // for instructions with Relative addresses.
+    if let Address::ZeroPage(val) = addr {
+        if inst_table.instructions[&mnemonic]
+            .address_modes
+            .contains_key(&AddressMode::Relative)
+        {
+            mode = AddressMode::Relative;
+            addr = Address::Relative(val);
         }
     }
 
-    Err(nom::Err::Error(Error::from_custom(
+    let opcode = match inst_table.instructions[&mnemonic].address_modes.get(&mode) {
+        Some(opcode) => *opcode,
+        None => return Err(Error::unsupported_address_mode(i, mnemonic, mode)),
+    };
+
+    Ok((
         i,
-        ErrorKind::UnknownMnemonic(i, "xxx".to_string()),
-    )))
+        Line {
+            inst: Instruction {
+                mnemonic,
+                opcode,
+                addr,
+            },
+        },
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_addr_mode<F: Fn(&str) -> IResult<&str, Address>>(
+    fn test_addr_mode<F: Fn(&str) -> ParserResult<Address>>(
         f: F,
         inputs: &[&'static str],
         expected: Address,
@@ -598,19 +731,20 @@ mod tests {
 
     #[test]
     fn mnemonic_matching() {
-        assert_eq!(mnemonic(Mnemonic::Adc)("adc"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::Adc)("Adc"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::Adc)("ADC"), Ok(("", ())));
+        let table = get_huc6280_instruction_table().unwrap();
+        assert_eq!(mnemonic(&table, "adc"), Ok(("", Mnemonic::Adc)));
+        assert_eq!(mnemonic(&table, "Adc"), Ok(("", Mnemonic::Adc)));
+        assert_eq!(mnemonic(&table, "ADC"), Ok(("", Mnemonic::Adc)));
 
-        assert_eq!(mnemonic(Mnemonic::Bbr(0))("bbr0"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::Bbs(1))("bbs1"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::Rmb(3))("rmb3"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::Smb(4))("smb4"), Ok(("", ())));
-        assert_eq!(mnemonic(Mnemonic::St(2))("st2"), Ok(("", ())));
+        assert_eq!(mnemonic(&table, "bbr0"), Ok(("", Mnemonic::Bbr(0))));
+        assert_eq!(mnemonic(&table, "bbs1"), Ok(("", Mnemonic::Bbs(1))));
+        assert_eq!(mnemonic(&table, "rmb3"), Ok(("", Mnemonic::Rmb(3))));
+        assert_eq!(mnemonic(&table, "smb4"), Ok(("", Mnemonic::Smb(4))));
+        assert_eq!(mnemonic(&table, "st2"), Ok(("", Mnemonic::St(2))));
     }
 
     fn test_asm_line(
-        table: &Vec<Box<dyn Fn(&str) -> IResult<&str, Instruction>>>,
+        table: &InstructionTable,
         asm: &str,
         mnemonic: &Mnemonic,
         opcode: u8,
@@ -644,7 +778,7 @@ mod tests {
     }
 
     fn test_alu_line(
-        table: &Vec<Box<dyn Fn(&str) -> IResult<&str, Instruction>>>,
+        table: &InstructionTable,
         inst_str: &str,
         mnemonic: &Mnemonic,
         opcodes: AluOpcodes,
@@ -731,7 +865,7 @@ mod tests {
     }
 
     fn test_limited_alu_line(
-        table: &Vec<Box<dyn Fn(&str) -> IResult<&str, Instruction>>>,
+        table: &InstructionTable,
         inst_str: &str,
         mnemonic: &Mnemonic,
         opcodes: LimitedAluOpcodes,
@@ -780,7 +914,7 @@ mod tests {
     #[test]
     fn test_adc_line() {
         test_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "adc",
             &Mnemonic::Adc,
             AluOpcodes {
@@ -800,7 +934,7 @@ mod tests {
     #[test]
     fn test_and_line() {
         test_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "and",
             &Mnemonic::And,
             AluOpcodes {
@@ -820,7 +954,7 @@ mod tests {
     #[test]
     fn test_asl_line() {
         test_limited_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "asl",
             &Mnemonic::Asl,
             LimitedAluOpcodes {
@@ -835,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_bbr_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x0f, 0x1f, 0x2f, 0x3f, 0x4f, 0x5f, 0x6f, 0x7f];
         for i in 0..8 {
             test_asm_line(
@@ -850,7 +984,7 @@ mod tests {
 
     #[test]
     fn test_bbs_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x8f, 0x9f, 0xaf, 0xbf, 0xcf, 0xdf, 0xef, 0xff];
         for i in 0..8 {
             test_asm_line(
@@ -865,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_branch_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
             &table,
@@ -950,7 +1084,7 @@ mod tests {
 
     #[test]
     fn test_bit_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
             &table,
@@ -995,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_implied_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(&table, "brk", &Mnemonic::Brk, 0x00, Address::Implied);
 
@@ -1049,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_cmp_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_alu_line(
             &table,
@@ -1115,7 +1249,7 @@ mod tests {
 
     #[test]
     fn test_dec_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "dec $a5",
@@ -1149,7 +1283,7 @@ mod tests {
     #[test]
     fn test_eor_line() {
         test_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "eor",
             &Mnemonic::Eor,
             AluOpcodes {
@@ -1169,7 +1303,7 @@ mod tests {
     #[test]
     fn test_inc_line() {
         test_limited_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "inc",
             &Mnemonic::Inc,
             LimitedAluOpcodes {
@@ -1184,7 +1318,7 @@ mod tests {
 
     #[test]
     fn test_jumps_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "jmp $a55a",
@@ -1219,7 +1353,7 @@ mod tests {
     #[test]
     fn test_lda_line() {
         test_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "lda",
             &Mnemonic::Lda,
             AluOpcodes {
@@ -1238,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_ldx_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "ldx #$a5",
@@ -1282,7 +1416,7 @@ mod tests {
 
     #[test]
     fn test_ldy_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "ldy #$a5",
@@ -1327,7 +1461,7 @@ mod tests {
     #[test]
     fn test_lsr_line() {
         test_limited_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "lsr",
             &Mnemonic::Lsr,
             LimitedAluOpcodes {
@@ -1342,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_ora_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_alu_line(
             &table,
@@ -1364,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_rmb_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x07, 0x17, 0x27, 0x37, 0x47, 0x57, 0x67, 0x77];
         for i in 0..8 {
             test_asm_line(
@@ -1380,7 +1514,7 @@ mod tests {
     #[test]
     fn test_rol_line() {
         test_limited_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "rol",
             &Mnemonic::Rol,
             LimitedAluOpcodes {
@@ -1396,7 +1530,7 @@ mod tests {
     #[test]
     fn test_ror_line() {
         test_limited_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "ror",
             &Mnemonic::Ror,
             LimitedAluOpcodes {
@@ -1412,7 +1546,7 @@ mod tests {
     #[test]
     fn test_sbc_line() {
         test_alu_line(
-            &get_huc6280_instruction_table(),
+            &get_huc6280_instruction_table().unwrap(),
             "sbc",
             &Mnemonic::Sbc,
             AluOpcodes {
@@ -1431,7 +1565,7 @@ mod tests {
 
     #[test]
     fn test_smb_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x87, 0x97, 0xa7, 0xb7, 0xc7, 0xd7, 0xe7, 0xf7];
         for i in 0..8 {
             test_asm_line(
@@ -1446,7 +1580,7 @@ mod tests {
 
     #[test]
     fn test_st_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x03, 0x13, 0x23];
         for i in 0..3 {
             test_asm_line(
@@ -1461,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_sta_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "sta $a5",
@@ -1529,7 +1663,7 @@ mod tests {
 
     #[test]
     fn test_stx_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
             &table,
@@ -1558,7 +1692,7 @@ mod tests {
 
     #[test]
     fn test_sty_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
             &table,
@@ -1587,7 +1721,7 @@ mod tests {
 
     #[test]
     fn test_stz_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
             &table,
@@ -1624,7 +1758,7 @@ mod tests {
 
     #[test]
     fn test_transfer_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "tai $a55a, $5a5a, $5aa5",
@@ -1664,7 +1798,7 @@ mod tests {
 
     #[test]
     fn test_tam_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "tam #$a5",
@@ -1676,7 +1810,7 @@ mod tests {
 
     #[test]
     fn test_tma_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "tma #$a5",
@@ -1688,7 +1822,7 @@ mod tests {
 
     #[test]
     fn test_trb_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "trb $a5",
@@ -1707,7 +1841,7 @@ mod tests {
 
     #[test]
     fn test_tsb_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "tsb $a5",
@@ -1726,7 +1860,7 @@ mod tests {
 
     #[test]
     fn test_tst_line() {
-        let table = get_huc6280_instruction_table();
+        let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
             "tst #$a5, $5a",
