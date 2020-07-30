@@ -39,15 +39,10 @@ impl InstructionTable {
             ));
         }
 
-        if !self.instructions.contains_key(&mnemonic) {
-            self.instructions.insert(
-                mnemonic,
-                Instruction {
-                    mnemonic,
-                    address_modes: HashMap::new(),
-                },
-            );
-        }
+        self.instructions.entry(mnemonic).or_insert(Instruction {
+            mnemonic,
+            address_modes: HashMap::new(),
+        });
 
         let inst = self.instructions.get_mut(&mnemonic).unwrap();
         if inst.address_modes.contains_key(&mode) {

@@ -572,7 +572,7 @@ pub fn parse(src: &str) -> Result<Vec<Line>, failure::Error> {
     let (i, lines) =
         separated_list(tag("|"), line(&table))(i).map_err(|e| format_err!("Parse error: {}", e))?;
 
-    if i.fragment().len() != 0 {
+    if !i.fragment().is_empty() {
         return Err(format_err!("Unexpected input: {}", i.fragment()));
     }
 
@@ -598,7 +598,7 @@ mod tests {
         for input in inputs {
             let res = f(Span::new(input)).map_err(|e| format_err!("parse error: {:?}", e))?;
 
-            if res.0.fragment().len() > 0 {
+            if !res.0.fragment().is_empty() {
                 return Err(format_err!(
                     "Parsing {} left input {}",
                     input,
@@ -784,7 +784,7 @@ mod tests {
         let res = mnemonic(&table, Span::new(mnemonic_str))
             .map_err(|e| format_err!("Parsing {} returned error {:?}.", mnemonic_str, e))?;
 
-        if res.0.fragment().len() > 0 {
+        if !res.0.fragment().is_empty() {
             return Err(format_err!(
                 "Parsing {} left input {}",
                 mnemonic_str,
@@ -844,7 +844,7 @@ mod tests {
     ) -> Result<(), failure::Error> {
         let res = line(&table)(Span::new(asm))
             .map_err(|e| format_err!("Parsing {} returned error {:?}.", asm, e))?;
-        if res.0.fragment().len() > 0 {
+        if !res.0.fragment().is_empty() {
             return Err(format_err!(
                 "Parsing {} left input {}",
                 asm,
@@ -854,7 +854,7 @@ mod tests {
 
         let expected = Line {
             inst: Instruction {
-                mnemonic: mnemonic.clone(),
+                mnemonic: *mnemonic,
                 opcode,
                 addr,
             },
