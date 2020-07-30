@@ -8,6 +8,7 @@ use nom::{
     number::complete::le_u8,
     IResult,
 };
+use nom_locate::{position, LocatedSpan};
 use num_traits::Num;
 use strum::IntoStaticStr;
 
@@ -16,6 +17,8 @@ mod inst_table;
 
 use huc6280::get_huc6280_instruction_table;
 use inst_table::InstructionTable;
+
+type Span<'a> = LocatedSpan<&'a str>;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Error<I> {
@@ -66,7 +69,7 @@ impl<I> From<(I, nom::error::ErrorKind)> for Error<I> {
     }
 }
 
-type ParserResult<'a, T> = IResult<&'a str, T, Error<&'a str>>;
+type ParserResult<'a, T> = IResult<Span<'a>, T, Error<Span<'a>>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, IntoStaticStr, PartialEq)]
 pub(crate) enum Mnemonic {
@@ -265,27 +268,27 @@ struct Line {
     inst: Instruction,
 }
 
-fn from_hex<T: Num>(input: &str) -> Result<T, T::FromStrRadixErr> {
-    T::from_str_radix(input, 16)
+fn from_hex<T: Num>(input: Span) -> Result<T, T::FromStrRadixErr> {
+    T::from_str_radix(input.fragment(), 16)
 }
 
 fn is_hex_digit(c: char) -> bool {
     c.is_digit(16)
 }
 
-fn hex_u8(i: &str) -> ParserResult<u8> {
+fn hex_u8(i: Span) -> ParserResult<u8> {
     map_res(take_while_m_n(2, 2, is_hex_digit), from_hex)(i)
 }
 
-fn hex_u16(i: &str) -> ParserResult<u16> {
+fn hex_u16(i: Span) -> ParserResult<u16> {
     map_res(take_while_m_n(4, 4, is_hex_digit), from_hex)(i)
 }
 
-fn parens<T, F>(f: F) -> impl Fn(&str) -> ParserResult<T>
+fn parens<T, F>(f: F) -> impl Fn(Span) -> ParserResult<T>
 where
-    F: Fn(&str) -> ParserResult<T>,
+    F: Fn(Span) -> ParserResult<T>,
 {
-    move |i: &str| {
+    move |i: Span| {
         let (i, _) = tag("(")(i)?;
         let (i, _) = space0(i)?;
         let (i, val) = f(i)?;
@@ -296,47 +299,49 @@ where
     }
 }
 
-fn comma(i: &str) -> ParserResult<()> {
+fn comma(i: Span) -> ParserResult<()> {
     let (i, _) = space0(i)?;
     let (i, _) = tag(",")(i)?;
     let (i, _) = space0(i)?;
     Ok((i, ()))
 }
 
-fn addr_mode_implied(i: &str) -> ParserResult<Address> {
+fn addr_mode_implied(i: Span) -> ParserResult<Address> {
     Ok((i, Address::Implied))
 }
 
-fn addr_mode_accumulator(i: &str) -> ParserResult<Address> {
+fn addr_mode_accumulator(i: Span) -> ParserResult<Address> {
     let (i, _) = alt((tag("a"), tag("A")))(i)?;
     Ok((i, Address::Accumulator))
 }
 
-fn addr_mode_relative(i: &str) -> ParserResult<Address> {
+fn addr_mode_relative(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::Relative(addr)))
 }
 
-fn indexed_x(i: &str) -> ParserResult<&str> {
+fn indexed_x(i: Span) -> ParserResult<()> {
     let (i, _) = comma(i)?;
-    alt((tag("x"), tag("X")))(i)
+    let (i, _) = alt((tag("x"), tag("X")))(i)?;
+    Ok((i, ()))
 }
 
-fn indexed_y(i: &str) -> ParserResult<&str> {
+fn indexed_y(i: Span) -> ParserResult<()> {
     let (i, _) = comma(i)?;
-    alt((tag("y"), tag("Y")))(i)
+    let (i, _) = alt((tag("y"), tag("Y")))(i)?;
+    Ok((i, ()))
 }
 
-fn addr_mode_immediate(i: &str) -> ParserResult<Address> {
+fn addr_mode_immediate(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::Immediate(addr)))
 }
 
-fn addr_mode_immediate_zero_page(i: &str) -> ParserResult<Address> {
+fn addr_mode_immediate_zero_page(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -346,7 +351,7 @@ fn addr_mode_immediate_zero_page(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ImmediateZeroPage(val, addr)))
 }
 
-fn addr_mode_immediate_zero_page_x(i: &str) -> ParserResult<Address> {
+fn addr_mode_immediate_zero_page_x(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -357,7 +362,7 @@ fn addr_mode_immediate_zero_page_x(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ImmediateZeroPageX(val, addr)))
 }
 
-fn addr_mode_immediate_absolute(i: &str) -> ParserResult<Address> {
+fn addr_mode_immediate_absolute(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -367,7 +372,7 @@ fn addr_mode_immediate_absolute(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ImmediateAbsolute(val, addr)))
 }
 
-fn addr_mode_immediate_absolute_x(i: &str) -> ParserResult<Address> {
+fn addr_mode_immediate_absolute_x(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("#$")(i)?;
     let (i, val) = hex_u8(i)?;
     let (i, _) = comma(i)?;
@@ -378,14 +383,14 @@ fn addr_mode_immediate_absolute_x(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ImmediateAbsoluteX(val, addr)))
 }
 
-fn addr_mode_zero_page(i: &str) -> ParserResult<Address> {
+fn addr_mode_zero_page(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
     Ok((i, Address::ZeroPage(addr)))
 }
 
-fn addr_mode_zero_page_x(i: &str) -> ParserResult<Address> {
+fn addr_mode_zero_page_x(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
     let (i, _) = indexed_x(i)?;
@@ -393,7 +398,7 @@ fn addr_mode_zero_page_x(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ZeroPageX(addr)))
 }
 
-fn addr_mode_zero_page_y(i: &str) -> ParserResult<Address> {
+fn addr_mode_zero_page_y(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
     let (i, _) = indexed_y(i)?;
@@ -401,7 +406,7 @@ fn addr_mode_zero_page_y(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ZeroPageY(addr)))
 }
 
-fn addr_mode_zero_page_relative(i: &str) -> ParserResult<Address> {
+fn addr_mode_zero_page_relative(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u8(i)?;
 
@@ -413,14 +418,14 @@ fn addr_mode_zero_page_relative(i: &str) -> ParserResult<Address> {
     Ok((i, Address::ZeroPageRelative(addr, offset)))
 }
 
-fn addr_mode_absolute(i: &str) -> ParserResult<Address> {
+fn addr_mode_absolute(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
 
     Ok((i, Address::Absolute(addr)))
 }
 
-fn addr_mode_absolute_x(i: &str) -> ParserResult<Address> {
+fn addr_mode_absolute_x(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
     let (i, _) = indexed_x(i)?;
@@ -428,7 +433,7 @@ fn addr_mode_absolute_x(i: &str) -> ParserResult<Address> {
     Ok((i, Address::AbsoluteX(addr)))
 }
 
-fn addr_mode_absolute_y(i: &str) -> ParserResult<Address> {
+fn addr_mode_absolute_y(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, addr) = hex_u16(i)?;
     let (i, _) = indexed_y(i)?;
@@ -436,8 +441,8 @@ fn addr_mode_absolute_y(i: &str) -> ParserResult<Address> {
     Ok((i, Address::AbsoluteY(addr)))
 }
 
-fn addr_mode_indirect(i: &str) -> ParserResult<Address> {
-    parens(|i: &str| {
+fn addr_mode_indirect(i: Span) -> ParserResult<Address> {
+    parens(|i: Span| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u16(i)?;
 
@@ -445,8 +450,8 @@ fn addr_mode_indirect(i: &str) -> ParserResult<Address> {
     })(i)
 }
 
-fn addr_mode_indexed_indirect(i: &str) -> ParserResult<Address> {
-    parens(|i: &str| {
+fn addr_mode_indexed_indirect(i: Span) -> ParserResult<Address> {
+    parens(|i: Span| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u8(i)?;
         let (i, _) = indexed_x(i)?;
@@ -455,8 +460,8 @@ fn addr_mode_indexed_indirect(i: &str) -> ParserResult<Address> {
     })(i)
 }
 
-fn addr_mode_indexed_indirect16(i: &str) -> ParserResult<Address> {
-    parens(|i: &str| {
+fn addr_mode_indexed_indirect16(i: Span) -> ParserResult<Address> {
+    parens(|i: Span| {
         let (i, _) = tag("$")(i)?;
         let (i, addr) = hex_u16(i)?;
         let (i, _) = indexed_x(i)?;
@@ -465,8 +470,8 @@ fn addr_mode_indexed_indirect16(i: &str) -> ParserResult<Address> {
     })(i)
 }
 
-fn addr_mode_indirect_indexed(i: &str) -> ParserResult<Address> {
-    let (i, addr) = parens(|i: &str| {
+fn addr_mode_indirect_indexed(i: Span) -> ParserResult<Address> {
+    let (i, addr) = parens(|i: Span| {
         let (i, _) = tag("$")(i)?;
         hex_u8(i)
     })(i)?;
@@ -474,7 +479,7 @@ fn addr_mode_indirect_indexed(i: &str) -> ParserResult<Address> {
     Ok((i, Address::IndirectIndexed(addr)))
 }
 
-fn addr_mode_block_transfer(i: &str) -> ParserResult<Address> {
+fn addr_mode_block_transfer(i: Span) -> ParserResult<Address> {
     let (i, _) = tag("$")(i)?;
     let (i, src_addr) = hex_u16(i)?;
     let (i, _) = comma(i)?;
@@ -487,7 +492,7 @@ fn addr_mode_block_transfer(i: &str) -> ParserResult<Address> {
     Ok((i, Address::BlockTransfer(src_addr, dst_addr, len)))
 }
 
-fn address(i: &str) -> IResult<&str, Address, Error<&str>> {
+fn address(i: Span) -> ParserResult<Address> {
     alt((
         addr_mode_block_transfer,
         addr_mode_indirect_indexed,
@@ -516,12 +521,9 @@ fn is_mnemonic_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
 }
 
-fn mnemonic<'a>(
-    inst_table: &InstructionTable,
-    i: &'a str,
-) -> IResult<&'a str, Mnemonic, Error<&'a str>> {
+fn mnemonic<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, Mnemonic> {
     let (i, mnemonic_str) = take_while(is_mnemonic_char)(i)?;
-    let mnemonic_str = mnemonic_str.to_lowercase();
+    let mnemonic_str = mnemonic_str.fragment().to_lowercase();
 
     match inst_table.mnemonic_map.get(&mnemonic_str) {
         Some(mnemonic) => Ok((i, *mnemonic)),
@@ -529,10 +531,10 @@ fn mnemonic<'a>(
     }
 }
 
-fn line<'a>(inst_table: &InstructionTable, i: &'a str) -> IResult<&'a str, Line, Error<&'a str>> {
+fn line<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, Line> {
     let (i, mnemonic) = mnemonic(inst_table, i)?;
 
-    let (i, addr) = opt(|i: &str| -> ParserResult<Address> {
+    let (i, addr) = opt(|i: Span| -> ParserResult<Address> {
         let (i, _) = space1(i)?;
         address(i)
     })(i)?;
@@ -574,20 +576,32 @@ fn line<'a>(inst_table: &InstructionTable, i: &'a str) -> IResult<&'a str, Line,
 mod tests {
     use super::*;
 
-    fn test_addr_mode<F: Fn(&str) -> ParserResult<Address>>(
+    fn test_addr_mode<F: Fn(Span) -> ParserResult<Address>>(
         f: F,
         inputs: &[&'static str],
         expected: Address,
     ) {
         for input in inputs {
-            let res = f(input);
+            let res = f(Span::new(input));
             assert_eq!(
-                res,
-                Ok(("", expected.clone())),
-                "parsing {}: {:x?} != {:x?}",
+                res.is_ok(),
+                true,
+                "Parsing {} returned error {:?}.",
                 input,
-                &res,
-                &expected
+                res
+            );
+            let res = res.unwrap();
+            assert_eq!(
+                *res.0.fragment(),
+                "",
+                "Parsing {} left input {}",
+                input,
+                *res.0.fragment()
+            );
+            assert_eq!(
+                res.1, expected,
+                "parsing {}: {:x?} != {:x?}",
+                input, &res, &expected
             );
         }
     }
@@ -729,18 +743,38 @@ mod tests {
         );
     }
 
+    fn test_mnemonic(table: &InstructionTable, mnemonic_str: &str, expected: Mnemonic) {
+        let res = mnemonic(&table, Span::new(mnemonic_str));
+        assert_eq!(
+            res.is_ok(),
+            true,
+            "Parsing {} returned error {:?}.",
+            mnemonic_str,
+            res
+        );
+        let res = res.unwrap();
+        assert_eq!(
+            *res.0.fragment(),
+            "",
+            "Parsing {} left input {}",
+            mnemonic_str,
+            *res.0.fragment()
+        );
+        assert_eq!(res.1, expected);
+    }
+
     #[test]
     fn mnemonic_matching() {
         let table = get_huc6280_instruction_table().unwrap();
-        assert_eq!(mnemonic(&table, "adc"), Ok(("", Mnemonic::Adc)));
-        assert_eq!(mnemonic(&table, "Adc"), Ok(("", Mnemonic::Adc)));
-        assert_eq!(mnemonic(&table, "ADC"), Ok(("", Mnemonic::Adc)));
+        test_mnemonic(&table, "adc", Mnemonic::Adc);
+        test_mnemonic(&table, "Adc", Mnemonic::Adc);
+        test_mnemonic(&table, "ADC", Mnemonic::Adc);
 
-        assert_eq!(mnemonic(&table, "bbr0"), Ok(("", Mnemonic::Bbr(0))));
-        assert_eq!(mnemonic(&table, "bbs1"), Ok(("", Mnemonic::Bbs(1))));
-        assert_eq!(mnemonic(&table, "rmb3"), Ok(("", Mnemonic::Rmb(3))));
-        assert_eq!(mnemonic(&table, "smb4"), Ok(("", Mnemonic::Smb(4))));
-        assert_eq!(mnemonic(&table, "st2"), Ok(("", Mnemonic::St(2))));
+        test_mnemonic(&table, "bbr0", Mnemonic::Bbr(0));
+        test_mnemonic(&table, "bbs1", Mnemonic::Bbs(1));
+        test_mnemonic(&table, "rmb3", Mnemonic::Rmb(3));
+        test_mnemonic(&table, "smb4", Mnemonic::Smb(4));
+        test_mnemonic(&table, "st2", Mnemonic::St(2));
     }
 
     fn test_asm_line(
@@ -750,18 +784,31 @@ mod tests {
         opcode: u8,
         addr: Address,
     ) {
+        let res = line(&table, Span::new(asm));
         assert_eq!(
-            line(&table, asm),
-            Ok((
-                (""),
-                Line {
-                    inst: Instruction {
-                        mnemonic: mnemonic.clone(),
-                        opcode,
-                        addr,
-                    }
+            res.is_ok(),
+            true,
+            "Parsing {} returned error {:?}.",
+            asm,
+            res
+        );
+        let res = res.unwrap();
+        assert_eq!(
+            *res.0.fragment(),
+            "",
+            "Parsing {} left input {}",
+            asm,
+            *res.0.fragment()
+        );
+        assert_eq!(
+            res.1,
+            Line {
+                inst: Instruction {
+                    mnemonic: mnemonic.clone(),
+                    opcode,
+                    addr,
                 }
-            ))
+            }
         );
     }
 
