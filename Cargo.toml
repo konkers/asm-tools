@@ -2,4 +2,5 @@
 
 members = [
     "asm65",
+    "util65",
 ]

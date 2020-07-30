@@ -1,14 +1,14 @@
+use failure::format_err;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while, take_while_m_n},
+    bytes::complete::{tag, take_while, take_while_m_n},
     character::complete::{space0, space1},
     combinator::{map_res, opt},
     error::ParseError,
-    multi::many_m_n,
-    number::complete::le_u8,
+    multi::separated_list,
     IResult,
 };
-use nom_locate::{position, LocatedSpan};
+use nom_locate::LocatedSpan;
 use num_traits::Num;
 use strum::IntoStaticStr;
 
@@ -72,7 +72,7 @@ impl<I> From<(I, nom::error::ErrorKind)> for Error<I> {
 type ParserResult<'a, T> = IResult<Span<'a>, T, Error<Span<'a>>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, IntoStaticStr, PartialEq)]
-pub(crate) enum Mnemonic {
+pub enum Mnemonic {
     Adc,
     And,
     Asl,
@@ -182,7 +182,7 @@ impl From<Mnemonic> for String {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum AddressMode {
+pub enum AddressMode {
     Implied,
     Accumulator,
     Relative,
@@ -206,7 +206,7 @@ pub(crate) enum AddressMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Address {
+pub enum Address {
     Implied,
     Accumulator,
     Relative(u8),
@@ -257,14 +257,14 @@ impl Address {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Instruction {
+pub struct Instruction {
     mnemonic: Mnemonic,
     opcode: u8,
     addr: Address,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Line {
+pub struct Line {
     inst: Instruction,
 }
 
@@ -531,45 +531,60 @@ fn mnemonic<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, 
     }
 }
 
-fn line<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, Line> {
-    let (i, mnemonic) = mnemonic(inst_table, i)?;
+fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResult<'a, Line> {
+    move |i: Span<'a>| {
+        let (i, mnemonic) = mnemonic(inst_table, i)?;
 
-    let (i, addr) = opt(|i: Span| -> ParserResult<Address> {
-        let (i, _) = space1(i)?;
-        address(i)
-    })(i)?;
+        let (i, addr) = opt(|i: Span| -> ParserResult<Address> {
+            let (i, _) = space1(i)?;
+            address(i)
+        })(i)?;
 
-    let mut addr = addr.unwrap_or(Address::Implied);
-    let mut mode = addr.mode();
+        let mut addr = addr.unwrap_or(Address::Implied);
+        let mut mode = addr.mode();
 
-    // ZeroPage and Relative have the same text representation.  ZeroPage
-    // takes precedence in the parsing so we need to fix it up here
-    // for instructions with Relative addresses.
-    if let Address::ZeroPage(val) = addr {
-        if inst_table.instructions[&mnemonic]
-            .address_modes
-            .contains_key(&AddressMode::Relative)
-        {
-            mode = AddressMode::Relative;
-            addr = Address::Relative(val);
+        // ZeroPage and Relative have the same text representation.  ZeroPage
+        // takes precedence in the parsing so we need to fix it up here
+        // for instructions with Relative addresses.
+        if let Address::ZeroPage(val) = addr {
+            if inst_table.instructions[&mnemonic]
+                .address_modes
+                .contains_key(&AddressMode::Relative)
+            {
+                mode = AddressMode::Relative;
+                addr = Address::Relative(val);
+            }
         }
+
+        let opcode = match inst_table.instructions[&mnemonic].address_modes.get(&mode) {
+            Some(opcode) => *opcode,
+            None => return Err(Error::unsupported_address_mode(i, mnemonic, mode)),
+        };
+
+        Ok((
+            i,
+            Line {
+                inst: Instruction {
+                    mnemonic,
+                    opcode,
+                    addr,
+                },
+            },
+        ))
+    }
+}
+
+pub fn parse(src: &str) -> Result<Vec<Line>, failure::Error> {
+    let table = get_huc6280_instruction_table()?;
+    let i = Span::new(src);
+    let (i, lines) =
+        separated_list(tag("|"), line(&table))(i).map_err(|e| format_err!("Parse error: {}", e))?;
+
+    if i.fragment().len() != 0 {
+        return Err(format_err!("Unexpected input: {}", i.fragment()));
     }
 
-    let opcode = match inst_table.instructions[&mnemonic].address_modes.get(&mode) {
-        Some(opcode) => *opcode,
-        None => return Err(Error::unsupported_address_mode(i, mnemonic, mode)),
-    };
-
-    Ok((
-        i,
-        Line {
-            inst: Instruction {
-                mnemonic,
-                opcode,
-                addr,
-            },
-        },
-    ))
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -784,7 +799,7 @@ mod tests {
         opcode: u8,
         addr: Address,
     ) {
-        let res = line(&table, Span::new(asm));
+        let res = line(&table)(Span::new(asm));
         assert_eq!(
             res.is_ok(),
             true,

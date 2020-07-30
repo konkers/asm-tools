@@ -1,7 +1,6 @@
 use failure::Error;
-use nom::{character::complete::space0, IResult};
 
-use super::{inst_table::InstructionTable, mnemonic, Address, AddressMode, Instruction, Mnemonic};
+use super::{inst_table::InstructionTable, AddressMode, Mnemonic};
 
 fn add_alu_op(
     mnemonic: Mnemonic,
@@ -35,23 +34,6 @@ fn add_limited_alu_op(
     table.add_op(mnemonic, opcode_base | 0x16, AddressMode::ZeroPageX)?;
     table.add_op(mnemonic, opcode_base | 0x06, AddressMode::ZeroPage)?;
     table.add_op(mnemonic, opcode_base | 0xa, AddressMode::Accumulator)?;
-
-    Ok(())
-}
-
-fn add_limited_immediate_op(
-    mnemonic: Mnemonic,
-    opcode_base: u8,
-    immediate_opcode: u8,
-    table: &mut InstructionTable,
-) -> Result<(), Error> {
-    let opcode_base = opcode_base & 0xe8;
-
-    table.add_op(mnemonic, opcode_base | 0x18, AddressMode::AbsoluteX)?;
-    table.add_op(mnemonic, opcode_base | 0x08, AddressMode::Absolute)?;
-    table.add_op(mnemonic, opcode_base | 0x10, AddressMode::ZeroPageX)?;
-    table.add_op(mnemonic, opcode_base | 0x00, AddressMode::ZeroPage)?;
-    table.add_op(mnemonic, immediate_opcode, AddressMode::Immediate)?;
 
     Ok(())
 }
