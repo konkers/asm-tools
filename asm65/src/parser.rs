@@ -315,13 +315,6 @@ fn addr_mode_accumulator(i: Span) -> ParserResult<Address> {
     Ok((i, Address::Accumulator))
 }
 
-fn addr_mode_relative(i: Span) -> ParserResult<Address> {
-    let (i, _) = tag("$")(i)?;
-    let (i, addr) = hex_u8(i)?;
-
-    Ok((i, Address::Relative(addr)))
-}
-
 fn indexed_x(i: Span) -> ParserResult<()> {
     let (i, _) = comma(i)?;
     let (i, _) = alt((tag("x"), tag("X")))(i)?;
@@ -511,7 +504,6 @@ fn address(i: Span) -> ParserResult<Address> {
         addr_mode_immediate_zero_page_x,
         addr_mode_immediate_zero_page,
         addr_mode_immediate,
-        addr_mode_relative,
         addr_mode_accumulator,
         addr_mode_implied,
     ))(i)
@@ -590,95 +582,119 @@ pub fn parse(src: &str) -> Result<Vec<Line>, failure::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use failure::format_err;
+    use std::panic;
+
+    #[test]
+    fn test_relative_address_mode() {
+        assert_eq!(Address::Relative(0xa5).mode(), AddressMode::Relative);
+    }
 
     fn test_addr_mode<F: Fn(Span) -> ParserResult<Address>>(
         f: F,
         inputs: &[&'static str],
         expected: Address,
-    ) {
+    ) -> Result<(), failure::Error> {
         for input in inputs {
-            let res = f(Span::new(input));
-            assert_eq!(
-                res.is_ok(),
-                true,
-                "Parsing {} returned error {:?}.",
-                input,
-                res
-            );
-            let res = res.unwrap();
-            assert_eq!(
-                *res.0.fragment(),
-                "",
-                "Parsing {} left input {}",
-                input,
-                *res.0.fragment()
-            );
-            assert_eq!(
-                res.1, expected,
-                "parsing {}: {:x?} != {:x?}",
-                input, &res, &expected
-            );
+            let res = f(Span::new(input)).map_err(|e| format_err!("parse error: {:?}", e))?;
+
+            if res.0.fragment().len() > 0 {
+                return Err(format_err!(
+                    "Parsing {} left input {}",
+                    input,
+                    *res.0.fragment()
+                ));
+            }
+
+            if res.1 != expected {
+                return Err(format_err!(
+                    "parsing {}: {:x?} != {:x?}",
+                    input,
+                    &res,
+                    &expected
+                ));
+            }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn addr_modes() {
-        test_addr_mode(addr_mode_implied, &[""], Address::Implied);
+    fn test_addr_mode_parse_error() {
+        let res = test_addr_mode(addr_mode_accumulator, &["B"], Address::Accumulator);
+        println!("{:?}", res);
+        assert!(res.is_err());
+    }
 
-        test_addr_mode(addr_mode_accumulator, &["A", "a"], Address::Accumulator);
+    #[test]
+    fn test_addr_mode_input_left() {
+        assert!(test_addr_mode(addr_mode_accumulator, &["AB"], Address::Accumulator).is_err());
+    }
+
+    #[test]
+    fn test_addr_mode_wrong_mode() {
+        assert!(test_addr_mode(addr_mode_accumulator, &["A"], Address::Implied).is_err());
+    }
+
+    #[test]
+    fn addr_modes() -> Result<(), failure::Error> {
+        test_addr_mode(addr_mode_implied, &[""], Address::Implied)?;
+
+        test_addr_mode(addr_mode_accumulator, &["A", "a"], Address::Accumulator)?;
 
         test_addr_mode(
             addr_mode_immediate,
             &["#$a5", "#$A5"],
             Address::Immediate(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_zero_page,
             &["$a5", "$A5"],
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_zero_page_x,
             &["$a5,x", "$a5,X", "$a5 ,x", "$a5 , x", "$a5, x"],
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_zero_page_y,
             &["$a5,y", "$a5,Y", "$a5 ,y", "$a5 , y", "$a5, y"],
             Address::ZeroPageY(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_zero_page_relative,
             &["$a5,$5a", "$a5 ,$5a", "$a5, $5a", "$a5 ,$5a"],
             Address::ZeroPageRelative(0xa5, 0x5a),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_absolute,
             &["$a55a", "$A55a"],
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_absolute_x,
             &["$a55a,x", "$a55a,X", "$a55a ,x", "$a55a, x", "$a55a , x"],
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
         test_addr_mode(
             addr_mode_absolute_y,
             &["$a55a,y", "$a55a,Y", "$a55a ,y", "$a55a, y", "$a55a , y"],
             Address::AbsoluteY(0xa55a),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_indirect,
             &["($a55a)", "($A55a)", "( $a55a)", "($a55a )", "( $a55a )"],
             Address::Indirect(0xa55a),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_indexed_indirect,
@@ -693,7 +709,7 @@ mod tests {
                 "($a5, x )",
             ],
             Address::IndexedIndirect(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_indirect_indexed,
@@ -708,7 +724,7 @@ mod tests {
                 "($a5) , y",
             ],
             Address::IndirectIndexed(0xa5),
-        );
+        )?;
 
         test_addr_mode(
             addr_mode_block_transfer,
@@ -731,7 +747,7 @@ mod tests {
                 "$a55a , $5aa5 , $a5a5",
             ],
             Address::BlockTransfer(0xa55a, 0x5aa5, 0xa5a5),
-        );
+        )?;
 
         // By now we're pretty sure commas and whitespace work so we'll stop
         // enumerating all the combinations.
@@ -740,56 +756,83 @@ mod tests {
             addr_mode_immediate_zero_page,
             &["#$a5, $a5"],
             Address::ImmediateZeroPage(0xa5, 0xa5),
-        );
+        )?;
         test_addr_mode(
             addr_mode_immediate_zero_page_x,
             &["#$a5, $a5, x"],
             Address::ImmediateZeroPageX(0xa5, 0xa5),
-        );
+        )?;
         test_addr_mode(
             addr_mode_immediate_absolute,
             &["#$a5, $a55a"],
             Address::ImmediateAbsolute(0xa5, 0xa55a),
-        );
+        )?;
         test_addr_mode(
             addr_mode_immediate_absolute_x,
             &["#$a5, $a55a, x"],
             Address::ImmediateAbsoluteX(0xa5, 0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
-    fn test_mnemonic(table: &InstructionTable, mnemonic_str: &str, expected: Mnemonic) {
-        let res = mnemonic(&table, Span::new(mnemonic_str));
-        assert_eq!(
-            res.is_ok(),
-            true,
-            "Parsing {} returned error {:?}.",
-            mnemonic_str,
-            res
-        );
-        let res = res.unwrap();
-        assert_eq!(
-            *res.0.fragment(),
-            "",
-            "Parsing {} left input {}",
-            mnemonic_str,
-            *res.0.fragment()
-        );
-        assert_eq!(res.1, expected);
+    fn test_mnemonic(
+        table: &InstructionTable,
+        mnemonic_str: &str,
+        expected: Mnemonic,
+    ) -> Result<(), failure::Error> {
+        let res = mnemonic(&table, Span::new(mnemonic_str))
+            .map_err(|e| format_err!("Parsing {} returned error {:?}.", mnemonic_str, e))?;
+
+        if res.0.fragment().len() > 0 {
+            return Err(format_err!(
+                "Parsing {} left input {}",
+                mnemonic_str,
+                *res.0.fragment()
+            ));
+        }
+
+        if res.1 != expected {
+            return Err(format_err!(
+                "parsing {}: {:x?} != {:x?}",
+                mnemonic_str,
+                &res,
+                &expected
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]
-    fn mnemonic_matching() {
+    fn mnemonic_matching() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
-        test_mnemonic(&table, "adc", Mnemonic::Adc);
-        test_mnemonic(&table, "Adc", Mnemonic::Adc);
-        test_mnemonic(&table, "ADC", Mnemonic::Adc);
+        test_mnemonic(&table, "adc", Mnemonic::Adc)?;
+        test_mnemonic(&table, "Adc", Mnemonic::Adc)?;
+        test_mnemonic(&table, "ADC", Mnemonic::Adc)?;
 
-        test_mnemonic(&table, "bbr0", Mnemonic::Bbr(0));
-        test_mnemonic(&table, "bbs1", Mnemonic::Bbs(1));
-        test_mnemonic(&table, "rmb3", Mnemonic::Rmb(3));
-        test_mnemonic(&table, "smb4", Mnemonic::Smb(4));
-        test_mnemonic(&table, "st2", Mnemonic::St(2));
+        test_mnemonic(&table, "bbr0", Mnemonic::Bbr(0))?;
+        test_mnemonic(&table, "bbs1", Mnemonic::Bbs(1))?;
+        test_mnemonic(&table, "rmb3", Mnemonic::Rmb(3))?;
+        test_mnemonic(&table, "smb4", Mnemonic::Smb(4))?;
+        test_mnemonic(&table, "st2", Mnemonic::St(2))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unknown_mnemonic() {
+        let table = get_huc6280_instruction_table().unwrap();
+        let res = mnemonic(&table, Span::new("zzz"));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn mnemonic_errors() {
+        let table = get_huc6280_instruction_table().unwrap();
+        assert!(test_mnemonic(&table, "nop", Mnemonic::Adc).is_err());
+        assert!(test_mnemonic(&table, "adc1", Mnemonic::Adc).is_err());
+        assert!(test_mnemonic(&table, "adc 1", Mnemonic::Adc).is_err());
     }
 
     fn test_asm_line(
@@ -798,33 +841,34 @@ mod tests {
         mnemonic: &Mnemonic,
         opcode: u8,
         addr: Address,
-    ) {
-        let res = line(&table)(Span::new(asm));
-        assert_eq!(
-            res.is_ok(),
-            true,
-            "Parsing {} returned error {:?}.",
-            asm,
-            res
-        );
-        let res = res.unwrap();
-        assert_eq!(
-            *res.0.fragment(),
-            "",
-            "Parsing {} left input {}",
-            asm,
-            *res.0.fragment()
-        );
-        assert_eq!(
-            res.1,
-            Line {
-                inst: Instruction {
-                    mnemonic: mnemonic.clone(),
-                    opcode,
-                    addr,
-                }
-            }
-        );
+    ) -> Result<(), failure::Error> {
+        let res = line(&table)(Span::new(asm))
+            .map_err(|e| format_err!("Parsing {} returned error {:?}.", asm, e))?;
+        if res.0.fragment().len() > 0 {
+            return Err(format_err!(
+                "Parsing {} left input {}",
+                asm,
+                *res.0.fragment()
+            ));
+        }
+
+        let expected = Line {
+            inst: Instruction {
+                mnemonic: mnemonic.clone(),
+                opcode,
+                addr,
+            },
+        };
+        if res.1 != expected {
+            return Err(format_err!(
+                "parsing {}: {:x?} != {:x?}",
+                asm,
+                &res,
+                &expected
+            ));
+        }
+
+        Ok(())
     }
 
     struct AluOpcodes {
@@ -844,14 +888,14 @@ mod tests {
         inst_str: &str,
         mnemonic: &Mnemonic,
         opcodes: AluOpcodes,
-    ) {
+    ) -> Result<(), failure::Error> {
         test_asm_line(
             &table,
             &*format!("{} #$a5", inst_str),
             mnemonic,
             opcodes.immediate,
             Address::Immediate(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -859,7 +903,7 @@ mod tests {
             mnemonic,
             opcodes.zero_page,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -867,7 +911,7 @@ mod tests {
             mnemonic,
             opcodes.zero_page_x,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -875,7 +919,7 @@ mod tests {
             mnemonic,
             opcodes.absolute,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -883,7 +927,7 @@ mod tests {
             mnemonic,
             opcodes.absolute_x,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -891,7 +935,7 @@ mod tests {
             mnemonic,
             opcodes.absolute_y,
             Address::AbsoluteY(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -899,7 +943,7 @@ mod tests {
             mnemonic,
             opcodes.indirect,
             Address::Indirect(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -907,7 +951,7 @@ mod tests {
             mnemonic,
             opcodes.indexed_indirect,
             Address::IndexedIndirect(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -915,7 +959,9 @@ mod tests {
             mnemonic,
             opcodes.indirect_indexed,
             Address::IndirectIndexed(0xa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     struct LimitedAluOpcodes {
@@ -931,14 +977,14 @@ mod tests {
         inst_str: &str,
         mnemonic: &Mnemonic,
         opcodes: LimitedAluOpcodes,
-    ) {
+    ) -> Result<(), failure::Error> {
         test_asm_line(
             &table,
             &*format!("{} A", inst_str),
             mnemonic,
             opcodes.accumulator,
             Address::Accumulator,
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -946,7 +992,7 @@ mod tests {
             mnemonic,
             opcodes.zero_page,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -954,7 +1000,7 @@ mod tests {
             mnemonic,
             opcodes.zero_page_x,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -962,7 +1008,7 @@ mod tests {
             mnemonic,
             opcodes.absolute,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -970,11 +1016,39 @@ mod tests {
             mnemonic,
             opcodes.absolute_x,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_adc_line() {
+    fn test_asm_line_parse_error() {
+        let table = get_huc6280_instruction_table().unwrap();
+        assert!(test_asm_line(&table, "zzz", &Mnemonic::Nop, 0xea, Address::Implied).is_err());
+    }
+
+    #[test]
+    fn test_asm_line_extra_input() {
+        let table = get_huc6280_instruction_table().unwrap();
+        assert!(test_asm_line(&table, "nop fds", &Mnemonic::Nop, 0xea, Address::Implied).is_err());
+    }
+
+    #[test]
+    fn test_asm_line_wrong_result() {
+        let table = get_huc6280_instruction_table().unwrap();
+        assert!(test_asm_line(&table, "brk", &Mnemonic::Nop, 0xea, Address::Implied).is_err());
+    }
+
+    #[test]
+    fn test_line_wrong_addr() {
+        let table = get_huc6280_instruction_table().unwrap();
+        let res = line(&table)(Span::new("iny $a55a, x"));
+        println!("{:?}", res);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_adc_line() -> Result<(), failure::Error> {
         test_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "adc",
@@ -990,11 +1064,12 @@ mod tests {
                 indexed_indirect: 0x61,
                 indirect_indexed: 0x71,
             },
-        );
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_and_line() {
+    fn test_and_line() -> Result<(), failure::Error> {
         test_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "and",
@@ -1010,11 +1085,13 @@ mod tests {
                 indexed_indirect: 0x21,
                 indirect_indexed: 0x31,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_asl_line() {
+    fn test_asl_line() -> Result<(), failure::Error> {
         test_limited_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "asl",
@@ -1026,11 +1103,12 @@ mod tests {
                 absolute: 0x0e,
                 absolute_x: 0x1e,
             },
-        );
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_bbr_line() {
+    fn test_bbr_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x0f, 0x1f, 0x2f, 0x3f, 0x4f, 0x5f, 0x6f, 0x7f];
         for i in 0..8 {
@@ -1040,12 +1118,13 @@ mod tests {
                 &Mnemonic::Bbr(i),
                 opcodes[i as usize],
                 Address::ZeroPageRelative(0xa5, 0x5a),
-            );
+            )?;
         }
+        Ok(())
     }
 
     #[test]
-    fn test_bbs_line() {
+    fn test_bbs_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x8f, 0x9f, 0xaf, 0xbf, 0xcf, 0xdf, 0xef, 0xff];
         for i in 0..8 {
@@ -1055,12 +1134,14 @@ mod tests {
                 &Mnemonic::Bbs(i),
                 opcodes[i as usize],
                 Address::ZeroPageRelative(0xa5, 0x5a),
-            );
+            )?;
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_branch_line() {
+    fn test_branch_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
@@ -1069,7 +1150,7 @@ mod tests {
             &Mnemonic::Bcc,
             0x90,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1077,7 +1158,7 @@ mod tests {
             &Mnemonic::Bcs,
             0xb0,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1085,7 +1166,7 @@ mod tests {
             &Mnemonic::Beq,
             0xf0,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1093,7 +1174,7 @@ mod tests {
             &Mnemonic::Bmi,
             0x30,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1101,7 +1182,7 @@ mod tests {
             &Mnemonic::Bne,
             0xd0,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1109,7 +1190,7 @@ mod tests {
             &Mnemonic::Bpl,
             0x10,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1117,7 +1198,7 @@ mod tests {
             &Mnemonic::Bra,
             0x80,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1125,7 +1206,7 @@ mod tests {
             &Mnemonic::Bsr,
             0x44,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1133,7 +1214,7 @@ mod tests {
             &Mnemonic::Bvc,
             0x50,
             Address::Relative(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1141,11 +1222,13 @@ mod tests {
             &Mnemonic::Bvs,
             0x70,
             Address::Relative(0xa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_bit_line() {
+    fn test_bit_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
@@ -1154,7 +1237,7 @@ mod tests {
             &Mnemonic::Bit,
             0x89,
             Address::Immediate(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1162,7 +1245,7 @@ mod tests {
             &Mnemonic::Bit,
             0x24,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1170,7 +1253,7 @@ mod tests {
             &Mnemonic::Bit,
             0x34,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1178,7 +1261,7 @@ mod tests {
             &Mnemonic::Bit,
             0x2c,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1186,65 +1269,69 @@ mod tests {
             &Mnemonic::Bit,
             0x3c,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_implied_line() {
+    fn test_implied_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
-        test_asm_line(&table, "brk", &Mnemonic::Brk, 0x00, Address::Implied);
+        test_asm_line(&table, "brk", &Mnemonic::Brk, 0x00, Address::Implied)?;
 
-        test_asm_line(&table, "cla", &Mnemonic::Cla, 0x62, Address::Implied);
-        test_asm_line(&table, "clc", &Mnemonic::Clc, 0x18, Address::Implied);
-        test_asm_line(&table, "cld", &Mnemonic::Cld, 0xd8, Address::Implied);
-        test_asm_line(&table, "cli", &Mnemonic::Cli, 0x58, Address::Implied);
-        test_asm_line(&table, "clv", &Mnemonic::Clv, 0xb8, Address::Implied);
-        test_asm_line(&table, "clx", &Mnemonic::Clx, 0x82, Address::Implied);
-        test_asm_line(&table, "cly", &Mnemonic::Cly, 0xc2, Address::Implied);
+        test_asm_line(&table, "cla", &Mnemonic::Cla, 0x62, Address::Implied)?;
+        test_asm_line(&table, "clc", &Mnemonic::Clc, 0x18, Address::Implied)?;
+        test_asm_line(&table, "cld", &Mnemonic::Cld, 0xd8, Address::Implied)?;
+        test_asm_line(&table, "cli", &Mnemonic::Cli, 0x58, Address::Implied)?;
+        test_asm_line(&table, "clv", &Mnemonic::Clv, 0xb8, Address::Implied)?;
+        test_asm_line(&table, "clx", &Mnemonic::Clx, 0x82, Address::Implied)?;
+        test_asm_line(&table, "cly", &Mnemonic::Cly, 0xc2, Address::Implied)?;
 
-        test_asm_line(&table, "csh", &Mnemonic::Csh, 0xd4, Address::Implied);
-        test_asm_line(&table, "csl", &Mnemonic::Csl, 0x54, Address::Implied);
+        test_asm_line(&table, "csh", &Mnemonic::Csh, 0xd4, Address::Implied)?;
+        test_asm_line(&table, "csl", &Mnemonic::Csl, 0x54, Address::Implied)?;
 
-        test_asm_line(&table, "dex", &Mnemonic::Dex, 0xca, Address::Implied);
-        test_asm_line(&table, "dey", &Mnemonic::Dey, 0x88, Address::Implied);
-        test_asm_line(&table, "inx", &Mnemonic::Inx, 0xe8, Address::Implied);
-        test_asm_line(&table, "iny", &Mnemonic::Iny, 0xc8, Address::Implied);
+        test_asm_line(&table, "dex", &Mnemonic::Dex, 0xca, Address::Implied)?;
+        test_asm_line(&table, "dey", &Mnemonic::Dey, 0x88, Address::Implied)?;
+        test_asm_line(&table, "inx", &Mnemonic::Inx, 0xe8, Address::Implied)?;
+        test_asm_line(&table, "iny", &Mnemonic::Iny, 0xc8, Address::Implied)?;
 
-        test_asm_line(&table, "nop", &Mnemonic::Nop, 0xea, Address::Implied);
+        test_asm_line(&table, "nop", &Mnemonic::Nop, 0xea, Address::Implied)?;
 
-        test_asm_line(&table, "pha", &Mnemonic::Pha, 0x48, Address::Implied);
-        test_asm_line(&table, "php", &Mnemonic::Php, 0x08, Address::Implied);
-        test_asm_line(&table, "phx", &Mnemonic::Phx, 0xda, Address::Implied);
-        test_asm_line(&table, "phy", &Mnemonic::Phy, 0x5a, Address::Implied);
-        test_asm_line(&table, "pla", &Mnemonic::Pla, 0x68, Address::Implied);
-        test_asm_line(&table, "plp", &Mnemonic::Plp, 0x28, Address::Implied);
-        test_asm_line(&table, "plx", &Mnemonic::Plx, 0xfa, Address::Implied);
-        test_asm_line(&table, "ply", &Mnemonic::Ply, 0x7a, Address::Implied);
+        test_asm_line(&table, "pha", &Mnemonic::Pha, 0x48, Address::Implied)?;
+        test_asm_line(&table, "php", &Mnemonic::Php, 0x08, Address::Implied)?;
+        test_asm_line(&table, "phx", &Mnemonic::Phx, 0xda, Address::Implied)?;
+        test_asm_line(&table, "phy", &Mnemonic::Phy, 0x5a, Address::Implied)?;
+        test_asm_line(&table, "pla", &Mnemonic::Pla, 0x68, Address::Implied)?;
+        test_asm_line(&table, "plp", &Mnemonic::Plp, 0x28, Address::Implied)?;
+        test_asm_line(&table, "plx", &Mnemonic::Plx, 0xfa, Address::Implied)?;
+        test_asm_line(&table, "ply", &Mnemonic::Ply, 0x7a, Address::Implied)?;
 
-        test_asm_line(&table, "rti", &Mnemonic::Rti, 0x40, Address::Implied);
-        test_asm_line(&table, "rts", &Mnemonic::Rts, 0x60, Address::Implied);
-        test_asm_line(&table, "sax", &Mnemonic::Sax, 0x22, Address::Implied);
-        test_asm_line(&table, "say", &Mnemonic::Say, 0x42, Address::Implied);
+        test_asm_line(&table, "rti", &Mnemonic::Rti, 0x40, Address::Implied)?;
+        test_asm_line(&table, "rts", &Mnemonic::Rts, 0x60, Address::Implied)?;
+        test_asm_line(&table, "sax", &Mnemonic::Sax, 0x22, Address::Implied)?;
+        test_asm_line(&table, "say", &Mnemonic::Say, 0x42, Address::Implied)?;
 
-        test_asm_line(&table, "sec", &Mnemonic::Sec, 0x38, Address::Implied);
-        test_asm_line(&table, "sed", &Mnemonic::Sed, 0xf8, Address::Implied);
-        test_asm_line(&table, "sei", &Mnemonic::Sei, 0x78, Address::Implied);
-        test_asm_line(&table, "set", &Mnemonic::Set, 0xf4, Address::Implied);
+        test_asm_line(&table, "sec", &Mnemonic::Sec, 0x38, Address::Implied)?;
+        test_asm_line(&table, "sed", &Mnemonic::Sed, 0xf8, Address::Implied)?;
+        test_asm_line(&table, "sei", &Mnemonic::Sei, 0x78, Address::Implied)?;
+        test_asm_line(&table, "set", &Mnemonic::Set, 0xf4, Address::Implied)?;
 
-        test_asm_line(&table, "sxy", &Mnemonic::Sxy, 0x02, Address::Implied);
+        test_asm_line(&table, "sxy", &Mnemonic::Sxy, 0x02, Address::Implied)?;
 
-        test_asm_line(&table, "tax", &Mnemonic::Tax, 0xaa, Address::Implied);
-        test_asm_line(&table, "tay", &Mnemonic::Tay, 0xa8, Address::Implied);
+        test_asm_line(&table, "tax", &Mnemonic::Tax, 0xaa, Address::Implied)?;
+        test_asm_line(&table, "tay", &Mnemonic::Tay, 0xa8, Address::Implied)?;
 
-        test_asm_line(&table, "tsx", &Mnemonic::Tsx, 0xba, Address::Implied);
-        test_asm_line(&table, "txa", &Mnemonic::Txa, 0x8a, Address::Implied);
-        test_asm_line(&table, "txs", &Mnemonic::Txs, 0x9a, Address::Implied);
-        test_asm_line(&table, "tya", &Mnemonic::Tya, 0x98, Address::Implied);
+        test_asm_line(&table, "tsx", &Mnemonic::Tsx, 0xba, Address::Implied)?;
+        test_asm_line(&table, "txa", &Mnemonic::Txa, 0x8a, Address::Implied)?;
+        test_asm_line(&table, "txs", &Mnemonic::Txs, 0x9a, Address::Implied)?;
+        test_asm_line(&table, "tya", &Mnemonic::Tya, 0x98, Address::Implied)?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_cmp_line() {
+    fn test_cmp_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_alu_line(
@@ -1262,7 +1349,7 @@ mod tests {
                 indexed_indirect: 0xc1,
                 indirect_indexed: 0xd1,
             },
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1270,21 +1357,21 @@ mod tests {
             &Mnemonic::Cpx,
             0xe0,
             Address::Immediate(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "cpx $a5",
             &Mnemonic::Cpx,
             0xe4,
             Address::ZeroPage(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "cpx $a55a",
             &Mnemonic::Cpx,
             0xec,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1292,25 +1379,27 @@ mod tests {
             &Mnemonic::Cpy,
             0xc0,
             Address::Immediate(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "cpy $a5",
             &Mnemonic::Cpy,
             0xc4,
             Address::ZeroPage(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "cpy $a55a",
             &Mnemonic::Cpy,
             0xcc,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_dec_line() {
+    fn test_dec_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1318,32 +1407,34 @@ mod tests {
             &Mnemonic::Dec,
             0xc6,
             Address::ZeroPage(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "dec $a5, X",
             &Mnemonic::Dec,
             0xd6,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "dec $a55a",
             &Mnemonic::Dec,
             0xce,
             Address::Absolute(0xa55a),
-        );
+        )?;
         test_asm_line(
             &table,
             "dec $a55a, X",
             &Mnemonic::Dec,
             0xde,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_eor_line() {
+    fn test_eor_line() -> Result<(), failure::Error> {
         test_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "eor",
@@ -1359,11 +1450,13 @@ mod tests {
                 indexed_indirect: 0x41,
                 indirect_indexed: 0x51,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_inc_line() {
+    fn test_inc_line() -> Result<(), failure::Error> {
         test_limited_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "inc",
@@ -1375,11 +1468,12 @@ mod tests {
                 absolute: 0xee,
                 absolute_x: 0xfe,
             },
-        );
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_jumps_line() {
+    fn test_jumps_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1387,21 +1481,21 @@ mod tests {
             &Mnemonic::Jmp,
             0x4c,
             Address::Absolute(0xa55a),
-        );
+        )?;
         test_asm_line(
             &table,
             "jmp ($a55a)",
             &Mnemonic::Jmp,
             0x6c,
             Address::Indirect(0xa55a),
-        );
+        )?;
         test_asm_line(
             &table,
             "jmp ($a55a, X)",
             &Mnemonic::Jmp,
             0x7c,
             Address::IndexedIndirect16(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1409,11 +1503,13 @@ mod tests {
             &Mnemonic::Jsr,
             0x20,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_lda_line() {
+    fn test_lda_line() -> Result<(), failure::Error> {
         test_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "lda",
@@ -1429,11 +1525,13 @@ mod tests {
                 indexed_indirect: 0xa1,
                 indirect_indexed: 0xb1,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_ldx_line() {
+    fn test_ldx_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1441,7 +1539,7 @@ mod tests {
             &Mnemonic::Ldx,
             0xa2,
             Address::Immediate(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1449,7 +1547,7 @@ mod tests {
             &Mnemonic::Ldx,
             0xa6,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1457,7 +1555,7 @@ mod tests {
             &Mnemonic::Ldx,
             0xb6,
             Address::ZeroPageY(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1465,7 +1563,7 @@ mod tests {
             &Mnemonic::Ldx,
             0xae,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1473,11 +1571,13 @@ mod tests {
             &Mnemonic::Ldx,
             0xbe,
             Address::AbsoluteY(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_ldy_line() {
+    fn test_ldy_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1485,7 +1585,7 @@ mod tests {
             &Mnemonic::Ldy,
             0xa0,
             Address::Immediate(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1493,7 +1593,7 @@ mod tests {
             &Mnemonic::Ldy,
             0xa4,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1501,7 +1601,7 @@ mod tests {
             &Mnemonic::Ldy,
             0xb4,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1509,7 +1609,7 @@ mod tests {
             &Mnemonic::Ldy,
             0xac,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1517,11 +1617,13 @@ mod tests {
             &Mnemonic::Ldy,
             0xbc,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_lsr_line() {
+    fn test_lsr_line() -> Result<(), failure::Error> {
         test_limited_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "lsr",
@@ -1533,11 +1635,13 @@ mod tests {
                 absolute: 0x4e,
                 absolute_x: 0x5e,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_ora_line() {
+    fn test_ora_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_alu_line(
@@ -1555,11 +1659,13 @@ mod tests {
                 indexed_indirect: 0x01,
                 indirect_indexed: 0x11,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_rmb_line() {
+    fn test_rmb_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x07, 0x17, 0x27, 0x37, 0x47, 0x57, 0x67, 0x77];
         for i in 0..8 {
@@ -1569,12 +1675,14 @@ mod tests {
                 &Mnemonic::Rmb(i),
                 opcodes[i as usize],
                 Address::ZeroPage(0xa5),
-            );
+            )?;
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_rol_line() {
+    fn test_rol_line() -> Result<(), failure::Error> {
         test_limited_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "rol",
@@ -1586,11 +1694,12 @@ mod tests {
                 absolute: 0x2e,
                 absolute_x: 0x3e,
             },
-        );
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_ror_line() {
+    fn test_ror_line() -> Result<(), failure::Error> {
         test_limited_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "ror",
@@ -1602,11 +1711,13 @@ mod tests {
                 absolute: 0x6e,
                 absolute_x: 0x7e,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_sbc_line() {
+    fn test_sbc_line() -> Result<(), failure::Error> {
         test_alu_line(
             &get_huc6280_instruction_table().unwrap(),
             "sbc",
@@ -1622,11 +1733,13 @@ mod tests {
                 indexed_indirect: 0xe1,
                 indirect_indexed: 0xf1,
             },
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_smb_line() {
+    fn test_smb_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x87, 0x97, 0xa7, 0xb7, 0xc7, 0xd7, 0xe7, 0xf7];
         for i in 0..8 {
@@ -1636,12 +1749,14 @@ mod tests {
                 &Mnemonic::Smb(i),
                 opcodes[i as usize],
                 Address::ZeroPage(0xa5),
-            );
+            )?;
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_st_line() {
+    fn test_st_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         let opcodes = [0x03, 0x13, 0x23];
         for i in 0..3 {
@@ -1651,12 +1766,14 @@ mod tests {
                 &Mnemonic::St(i),
                 opcodes[i as usize],
                 Address::Immediate(0xa5),
-            );
+            )?;
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_sta_line() {
+    fn test_sta_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1664,7 +1781,7 @@ mod tests {
             &Mnemonic::Sta,
             0x85,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1672,7 +1789,7 @@ mod tests {
             &Mnemonic::Sta,
             0x95,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1680,7 +1797,7 @@ mod tests {
             &Mnemonic::Sta,
             0x8d,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1688,7 +1805,7 @@ mod tests {
             &Mnemonic::Sta,
             0x9d,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1696,7 +1813,7 @@ mod tests {
             &Mnemonic::Sta,
             0x99,
             Address::AbsoluteY(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1704,7 +1821,7 @@ mod tests {
             &Mnemonic::Sta,
             0x92,
             Address::Indirect(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1712,7 +1829,7 @@ mod tests {
             &Mnemonic::Sta,
             0x81,
             Address::IndexedIndirect(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1720,11 +1837,13 @@ mod tests {
             &Mnemonic::Sta,
             0x91,
             Address::IndirectIndexed(0xa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_stx_line() {
+    fn test_stx_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
@@ -1733,7 +1852,7 @@ mod tests {
             &Mnemonic::Stx,
             0x86,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1741,7 +1860,7 @@ mod tests {
             &Mnemonic::Stx,
             0x96,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1749,11 +1868,13 @@ mod tests {
             &Mnemonic::Stx,
             0x8e,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_sty_line() {
+    fn test_sty_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
@@ -1762,7 +1883,7 @@ mod tests {
             &Mnemonic::Sty,
             0x84,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1770,7 +1891,7 @@ mod tests {
             &Mnemonic::Sty,
             0x94,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1778,11 +1899,13 @@ mod tests {
             &Mnemonic::Sty,
             0x8c,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_stz_line() {
+    fn test_stz_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
 
         test_asm_line(
@@ -1791,7 +1914,7 @@ mod tests {
             &Mnemonic::Stz,
             0x64,
             Address::ZeroPage(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1799,7 +1922,7 @@ mod tests {
             &Mnemonic::Stz,
             0x74,
             Address::ZeroPageX(0xa5),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1807,7 +1930,7 @@ mod tests {
             &Mnemonic::Stz,
             0x9c,
             Address::Absolute(0xa55a),
-        );
+        )?;
 
         test_asm_line(
             &table,
@@ -1815,11 +1938,13 @@ mod tests {
             &Mnemonic::Stz,
             0x9e,
             Address::AbsoluteX(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_transfer_line() {
+    fn test_transfer_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1827,39 +1952,41 @@ mod tests {
             &Mnemonic::Tai,
             0xf3,
             Address::BlockTransfer(0xa55a, 0x5a5a, 0x5aa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tdd $a55a, $5a5a, $5aa5",
             &Mnemonic::Tdd,
             0xc3,
             Address::BlockTransfer(0xa55a, 0x5a5a, 0x5aa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tia $a55a, $5a5a, $5aa5",
             &Mnemonic::Tia,
             0xe3,
             Address::BlockTransfer(0xa55a, 0x5a5a, 0x5aa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tii $a55a, $5a5a, $5aa5",
             &Mnemonic::Tii,
             0x73,
             Address::BlockTransfer(0xa55a, 0x5a5a, 0x5aa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tin $a55a, $5a5a, $5aa5",
             &Mnemonic::Tin,
             0xd3,
             Address::BlockTransfer(0xa55a, 0x5a5a, 0x5aa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_tam_line() {
+    fn test_tam_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1867,11 +1994,13 @@ mod tests {
             &Mnemonic::Tam,
             0x53,
             Address::Immediate(0xa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_tma_line() {
+    fn test_tma_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1879,11 +2008,13 @@ mod tests {
             &Mnemonic::Tma,
             0x43,
             Address::Immediate(0xa5),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_trb_line() {
+    fn test_trb_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1891,18 +2022,20 @@ mod tests {
             &Mnemonic::Trb,
             0x14,
             Address::ZeroPage(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "trb $a55a",
             &Mnemonic::Trb,
             0x1c,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_tsb_line() {
+    fn test_tsb_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1910,18 +2043,20 @@ mod tests {
             &Mnemonic::Tsb,
             0x04,
             Address::ZeroPage(0xa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tsb $a55a",
             &Mnemonic::Tsb,
             0x0c,
             Address::Absolute(0xa55a),
-        );
+        )?;
+
+        Ok(())
     }
 
     #[test]
-    fn test_tst_line() {
+    fn test_tst_line() -> Result<(), failure::Error> {
         let table = get_huc6280_instruction_table().unwrap();
         test_asm_line(
             &table,
@@ -1929,27 +2064,46 @@ mod tests {
             &Mnemonic::Tst,
             0x83,
             Address::ImmediateZeroPage(0xa5, 0x5a),
-        );
+        )?;
         test_asm_line(
             &table,
             "tst #$a5, $5a, x",
             &Mnemonic::Tst,
             0xa3,
             Address::ImmediateZeroPageX(0xa5, 0x5a),
-        );
+        )?;
         test_asm_line(
             &table,
             "tst #$a5, $5aa5",
             &Mnemonic::Tst,
             0x93,
             Address::ImmediateAbsolute(0xa5, 0x5aa5),
-        );
+        )?;
         test_asm_line(
             &table,
             "tst #$a5, $5aa5, x",
             &Mnemonic::Tst,
             0xb3,
             Address::ImmediateAbsoluteX(0xa5, 0x5aa5),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parser() {
+        let lines = parse("adc $45").unwrap();
+        assert_eq!(
+            lines,
+            vec![Line {
+                inst: Instruction {
+                    mnemonic: Mnemonic::Adc,
+                    opcode: 0x65,
+                    addr: Address::ZeroPage(0x45,),
+                },
+            }]
         );
+
+        assert!(parse("adc $45 1").is_err());
     }
 }

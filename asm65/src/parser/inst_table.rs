@@ -66,3 +66,27 @@ impl InstructionTable {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{AddressMode, Mnemonic};
+
+    #[test]
+    fn test_error_conditions() {
+        let mut table = InstructionTable::new();
+        table
+            .add_op(Mnemonic::Adc, 0xa5, AddressMode::Absolute)
+            .unwrap();
+
+        // Test for duplicate opcode error.
+        assert!(table
+            .add_op(Mnemonic::Adc, 0xa5, AddressMode::ZeroPage)
+            .is_err());
+
+        // Test for duplicate address mode error.
+        assert!(table
+            .add_op(Mnemonic::Adc, 0xa6, AddressMode::Absolute)
+            .is_err());
+    }
+}
