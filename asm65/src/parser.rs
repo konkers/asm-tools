@@ -2,7 +2,7 @@ use failure::format_err;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while_m_n},
-    character::complete::{space0, space1},
+    character::complete::{line_ending, space0, space1},
     combinator::{map_res, opt},
     error::ParseError,
     multi::separated_list,
@@ -569,8 +569,8 @@ fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResu
 pub fn parse(src: &str) -> Result<Vec<Line>, failure::Error> {
     let table = get_huc6280_instruction_table()?;
     let i = Span::new(src);
-    let (i, lines) =
-        separated_list(tag("|"), line(&table))(i).map_err(|e| format_err!("Parse error: {}", e))?;
+    let (i, lines) = separated_list(line_ending, line(&table))(i)
+        .map_err(|e| format_err!("Parse error: {}", e))?;
 
     if !i.fragment().is_empty() {
         return Err(format_err!("Unexpected input: {}", i.fragment()));
@@ -2102,6 +2102,26 @@ mod tests {
                     addr: Address::ZeroPage(0x45,),
                 },
             }]
+        );
+        let lines = parse("adc $45\nadc $45").unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                Line {
+                    inst: Instruction {
+                        mnemonic: Mnemonic::Adc,
+                        opcode: 0x65,
+                        addr: Address::ZeroPage(0x45,),
+                    },
+                },
+                Line {
+                    inst: Instruction {
+                        mnemonic: Mnemonic::Adc,
+                        opcode: 0x65,
+                        addr: Address::ZeroPage(0x45,),
+                    },
+                }
+            ]
         );
 
         assert!(parse("adc $45 1").is_err());
