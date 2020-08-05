@@ -1,7 +1,7 @@
 use failure::format_err;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while, take_while_m_n},
+    bytes::complete::{tag, take_till, take_while, take_while_m_n},
     character::complete::{line_ending, space0, space1},
     combinator::{map_res, opt},
     error::ParseError,
@@ -31,6 +31,7 @@ enum ErrorKind<I> {
     Nom(I, nom::error::ErrorKind),
     UnknownMnemonic(I, String),
     UnsupportedAddressMode(I, Mnemonic, AddressMode),
+    UnexpectedInput(I, String),
 }
 
 impl<I> Error<I> {
@@ -44,6 +45,13 @@ impl<I> Error<I> {
     fn unsupported_address_mode(i: I, mnemonic: Mnemonic, mode: AddressMode) -> nom::Err<Error<I>> {
         nom::Err::Error(Self {
             kind: ErrorKind::UnsupportedAddressMode(i, mnemonic, mode),
+            errors: Vec::new(),
+        })
+    }
+
+    fn unexpected_input(i: I, input: String) -> nom::Err<Error<I>> {
+        nom::Err::Error(Self {
+            kind: ErrorKind::UnexpectedInput(i, input),
             errors: Vec::new(),
         })
     }
@@ -265,7 +273,8 @@ pub struct Instruction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
-    inst: Instruction,
+    inst: Option<Instruction>,
+    comment: Option<String>,
 }
 
 fn from_hex<T: Num>(input: Span) -> Result<T, T::FromStrRadixErr> {
@@ -513,6 +522,14 @@ fn is_mnemonic_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
 }
 
+fn comment(i: Span) -> ParserResult<String> {
+    let (i, _) = space0(i)?;
+    let (i, _) = tag(Span::new(";"))(i)?;
+    let (i, content) = take_till(|c| c == '\n' || c == '\r')(i)?;
+
+    Ok((i, content.fragment().to_string()))
+}
+
 fn mnemonic<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, Mnemonic> {
     let (i, mnemonic_str) = take_while(is_mnemonic_char)(i)?;
     let mnemonic_str = mnemonic_str.fragment().to_lowercase();
@@ -523,7 +540,9 @@ fn mnemonic<'a>(inst_table: &InstructionTable, i: Span<'a>) -> ParserResult<'a, 
     }
 }
 
-fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResult<'a, Line> {
+fn instruction<'a>(
+    inst_table: &'a InstructionTable,
+) -> impl Fn(Span<'a>) -> ParserResult<'a, Instruction> {
     move |i: Span<'a>| {
         let (i, mnemonic) = mnemonic(inst_table, i)?;
 
@@ -555,12 +574,40 @@ fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResu
 
         Ok((
             i,
+            Instruction {
+                mnemonic,
+                opcode,
+                addr,
+            },
+        ))
+    }
+}
+
+fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResult<'a, Line> {
+    move |i: Span<'a>| {
+        // Pull out all text until a comment
+        let (i, pre_comment) = take_till(|c| c == ';')(i)?;
+
+        // Parse the instruction and any whitespace after.
+        let (pre_comment, inst) = instruction(inst_table)(pre_comment)?;
+        let (pre_comment, _) = space0(pre_comment)?;
+
+        // Error on any text left between the instructions and the
+        // comment/newline.
+        if !pre_comment.fragment().is_empty() {
+            return Err(Error::unexpected_input(
+                pre_comment,
+                pre_comment.fragment().to_string(),
+            ));
+        }
+
+        // Parse the comment
+        let (i, comment_text) = opt(comment)(i)?;
+        Ok((
+            i,
             Line {
-                inst: Instruction {
-                    mnemonic,
-                    opcode,
-                    addr,
-                },
+                inst: Some(inst),
+                comment: comment_text,
             },
         ))
     }
@@ -844,20 +891,14 @@ mod tests {
     ) -> Result<(), failure::Error> {
         let res = line(&table)(Span::new(asm))
             .map_err(|e| format_err!("Parsing {} returned error {:?}.", asm, e))?;
-        if !res.0.fragment().is_empty() {
-            return Err(format_err!(
-                "Parsing {} left input {}",
-                asm,
-                *res.0.fragment()
-            ));
-        }
 
         let expected = Line {
-            inst: Instruction {
+            inst: Some(Instruction {
                 mnemonic: *mnemonic,
                 opcode,
                 addr,
-            },
+            }),
+            comment: None,
         };
         if res.1 != expected {
             return Err(format_err!(
@@ -2096,30 +2137,33 @@ mod tests {
         assert_eq!(
             lines,
             vec![Line {
-                inst: Instruction {
+                inst: Some(Instruction {
                     mnemonic: Mnemonic::Adc,
                     opcode: 0x65,
                     addr: Address::ZeroPage(0x45,),
-                },
+                }),
+                comment: None,
             }]
         );
-        let lines = parse("adc $45\nadc $45").unwrap();
+        let lines = parse("adc $45 ; Comment\nadc $45").unwrap();
         assert_eq!(
             lines,
             vec![
                 Line {
-                    inst: Instruction {
+                    inst: Some(Instruction {
                         mnemonic: Mnemonic::Adc,
                         opcode: 0x65,
                         addr: Address::ZeroPage(0x45,),
-                    },
+                    }),
+                    comment: Some(" Comment".to_string()),
                 },
                 Line {
-                    inst: Instruction {
+                    inst: Some(Instruction {
                         mnemonic: Mnemonic::Adc,
                         opcode: 0x65,
                         addr: Address::ZeroPage(0x45,),
-                    },
+                    }),
+                    comment: None,
                 }
             ]
         );
