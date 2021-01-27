@@ -4,8 +4,8 @@ use nom::{
     bytes::complete::{tag, take_till, take_while, take_while_m_n},
     character::complete::{line_ending, space0, space1},
     combinator::{map_res, opt},
-    error::ParseError,
-    multi::separated_list,
+    error::{FromExternalError, ParseError},
+    multi::separated_list0,
     IResult,
 };
 use nom_locate::LocatedSpan;
@@ -74,6 +74,13 @@ impl<I> nom::error::ParseError<I> for Error<I> {
 impl<I> From<(I, nom::error::ErrorKind)> for Error<I> {
     fn from(e: (I, nom::error::ErrorKind)) -> Error<I> {
         Error::from_error_kind(e.0, e.1)
+    }
+}
+
+impl<I, E> FromExternalError<I, E> for Error<I> {
+    /// Create a new error from an input position and an external error
+    fn from_external_error(input: I, kind: nom::error::ErrorKind, _e: E) -> Self {
+        Self::from_error_kind(input, kind)
     }
 }
 
@@ -524,7 +531,7 @@ fn is_mnemonic_char(c: char) -> bool {
 
 fn comment(i: Span) -> ParserResult<String> {
     let (i, _) = space0(i)?;
-    let (i, _) = tag(Span::new(";"))(i)?;
+    let (i, _) = tag(";")(i)?;
     let (i, content) = take_till(|c| c == '\n' || c == '\r')(i)?;
 
     Ok((i, content.fragment().to_string()))
@@ -546,7 +553,7 @@ fn instruction<'a>(
     move |i: Span<'a>| {
         let (i, mnemonic) = mnemonic(inst_table, i)?;
 
-        let (i, addr) = opt(|i: Span| -> ParserResult<Address> {
+        let (i, addr) = opt(|i: Span<'a>| -> ParserResult<Address> {
             let (i, _) = space1(i)?;
             address(i)
         })(i)?;
@@ -616,7 +623,7 @@ fn line<'a>(inst_table: &'a InstructionTable) -> impl Fn(Span<'a>) -> ParserResu
 pub fn parse(src: &str) -> Result<Vec<Line>, failure::Error> {
     let table = get_huc6280_instruction_table()?;
     let i = Span::new(src);
-    let (i, lines) = separated_list(line_ending, line(&table))(i)
+    let (i, lines) = separated_list0(line_ending, line(&table))(i)
         .map_err(|e| format_err!("Parse error: {}", e))?;
 
     if !i.fragment().is_empty() {
@@ -631,6 +638,17 @@ mod tests {
     use super::*;
     use failure::format_err;
     use std::panic;
+
+    #[test]
+    fn test_from_external_error() {
+        assert_eq!(
+            Error::from_external_error("", nom::error::ErrorKind::Tag, format_err!("error")),
+            Error {
+                kind: ErrorKind::Nom("", nom::error::ErrorKind::Tag),
+                errors: Vec::new()
+            }
+        );
+    }
 
     #[test]
     fn test_relative_address_mode() {
